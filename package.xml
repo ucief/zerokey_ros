@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>zerokey_ros2</name>
+  <version>0.1.0</version>
+  <description>ROS 2 Jazzy node for streaming ZeroKey tag positions into ROS topics and tf2.</description>
+  <maintainer email="matthias@example.com">matthias</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>python3-requests</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+
+  <!-- signalrcore is a PyPI dependency declared in requirements.txt/setup.py;
+       there is currently no rosdep key for it. -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
