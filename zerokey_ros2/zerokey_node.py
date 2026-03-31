@@ -1,4 +1,5 @@
 import json
+import math
 import re
 import threading
 import traceback
@@ -55,7 +56,26 @@ def datetime_to_ros_time(dt: Optional[datetime]) -> Time:
 
 
 def make_identity_quaternion() -> Tuple[float, float, float, float]:
-    return (0.0, 0.0, 0.0, 1.0)
+    return (1.0, 0.0, 0.0, 0.0)
+
+
+def sanitize_quaternion(value: Any) -> Tuple[float, float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return make_identity_quaternion()
+
+    try:
+        quaternion = tuple(float(component) for component in value[:4])
+    except (TypeError, ValueError):
+        return make_identity_quaternion()
+
+    if not all(math.isfinite(component) for component in quaternion):
+        return make_identity_quaternion()
+
+    norm = math.sqrt(sum(component * component for component in quaternion))
+    if norm <= 1e-9:
+        return make_identity_quaternion()
+
+    return tuple(component / norm for component in quaternion)
 
 
 class ZeroKeyNode(Node):
@@ -313,9 +333,8 @@ class ZeroKeyNode(Node):
             return
 
         velocity = content.get("Velocity")
-        orientation = content.get("Orientation")
-        if not isinstance(orientation, (list, tuple)) or len(orientation) < 4:
-            orientation = make_identity_quaternion()
+        raw_orientation = content.get("Orientation")
+        orientation = sanitize_quaternion(raw_orientation)
 
         event_time = parse_iso_utc(payload.get("Timestamp"))
         stamp = datetime_to_ros_time(event_time)
