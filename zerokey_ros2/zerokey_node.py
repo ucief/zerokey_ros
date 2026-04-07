@@ -12,6 +12,7 @@ import rclpy
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from rclpy.time import Time
 from tf2_ros import TransformBroadcaster
 
@@ -33,10 +34,31 @@ def parse_iso_utc(ts: Optional[str]) -> Optional[datetime]:
 
     try:
         value = ts.strip()
-        if value.endswith("Z"):
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        match = re.fullmatch(
+            r"(?P<date>\d{4}-\d{2}-\d{2})T"
+            r"(?P<time>\d{2}:\d{2}:\d{2})"
+            r"(?P<fraction>\.\d+)?"
+            r"(?P<tz>Z|[+-]\d{2}:\d{2})?",
+            value,
+        )
+        if not match:
+            return None
 
-        dt = datetime.fromisoformat(value)
+        fraction = match.group("fraction") or ""
+        tz_suffix = match.group("tz") or ""
+
+        if fraction:
+            # Python 3.10 rejects some valid ISO8601 widths such as 4-digit fractions.
+            fraction_digits = fraction[1:]
+            fraction = "." + (fraction_digits[:6].ljust(6, "0"))
+
+        normalized = f"{match.group('date')}T{match.group('time')}{fraction}"
+        if tz_suffix == "Z":
+            normalized += "+00:00"
+        else:
+            normalized += tz_suffix
+
+        dt = datetime.fromisoformat(normalized)
         if dt.tzinfo is None:
             return dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc)
@@ -57,6 +79,32 @@ def datetime_to_ros_time(dt: Optional[datetime]) -> Time:
 
 def make_identity_quaternion() -> Tuple[float, float, float, float]:
     return (1.0, 0.0, 0.0, 0.0)
+
+
+def covariance_diagonal_to_matrix(
+    values: Any,
+    fallback: Tuple[float, float, float, float, float, float],
+) -> list[float]:
+    matrix = [0.0] * 36
+
+    if not isinstance(values, (list, tuple)) or len(values) != 6:
+        values = fallback
+
+    sanitized = []
+    for default_value, value in zip(fallback, values):
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            numeric_value = float(default_value)
+
+        if not math.isfinite(numeric_value) or numeric_value < 0.0:
+            numeric_value = float(default_value)
+        sanitized.append(numeric_value)
+
+    for index, diagonal_value in enumerate(sanitized):
+        matrix[index * 6 + index] = diagonal_value
+
+    return matrix
 
 
 def sanitize_quaternion(value: Any) -> Tuple[float, float, float, float]:
@@ -93,6 +141,15 @@ class ZeroKeyNode(Node):
         self.declare_parameter("max_update_rate", 20)
         self.declare_parameter("max_throughput", 10240)
         self.declare_parameter("reconnect_delay_sec", 5.0)
+        self.declare_parameter("publish_tf", False)
+        self.declare_parameter(
+            "pose_covariance_diagonal",
+            [0.008, 0.008, 0.10, 1.0e6, 1.0e6, 1.0e6],
+        )
+        self.declare_parameter(
+            "twist_covariance_diagonal",
+            [0.25, 0.25, 0.25, 1.0e6, 1.0e6, 1.0e6],
+        )
 
         self._lock = threading.Lock()
         self._pending_events: Deque[Dict[str, Any]] = deque()
@@ -104,8 +161,24 @@ class ZeroKeyNode(Node):
         self._stop_event = threading.Event()
         self._reconnect_event = threading.Event()
         self._tf_broadcaster = TransformBroadcaster(self)
+        self._publisher_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+        )
+        self._world_frame = str(self._parameter_value("world_frame"))
+        self._topic_prefix = str(self._parameter_value("topic_prefix"))
+        self._publish_tf = bool(self._parameter_value("publish_tf"))
+        self._pose_covariance = covariance_diagonal_to_matrix(
+            self._parameter_value("pose_covariance_diagonal"),
+            (0.008, 0.008, 0.10, 1.0e6, 1.0e6, 1.0e6),
+        )
+        self._twist_covariance = covariance_diagonal_to_matrix(
+            self._parameter_value("twist_covariance_diagonal"),
+            (0.25, 0.25, 0.25, 1.0e6, 1.0e6, 1.0e6),
+        )
+        self._event_guard = self.create_guard_condition(self._process_pending_events)
 
-        self._process_timer = self.create_timer(0.05, self._process_pending_events)
         self._connection_thread = threading.Thread(
             target=self._connection_worker,
             daemon=True,
@@ -222,6 +295,7 @@ class ZeroKeyNode(Node):
             payload = self._decode_payload(data)
             with self._lock:
                 self._pending_events.append(payload)
+            self._event_guard.trigger()
         except Exception as exc:
             self.get_logger().warning(f"Failed to decode event payload: {exc}")
             self.get_logger().debug(traceback.format_exc())
@@ -305,8 +379,12 @@ class ZeroKeyNode(Node):
     def _get_publisher_for_tag(self, tag_key: str):
         sanitized = sanitize_name(tag_key)
         if sanitized not in self._odom_publishers:
-            topic = f"{self._parameter_value('topic_prefix')}/{sanitized}/odom"
-            self._odom_publishers[sanitized] = self.create_publisher(Odometry, topic, 10)
+            topic = f"{self._topic_prefix}/{sanitized}/odom"
+            self._odom_publishers[sanitized] = self.create_publisher(
+                Odometry,
+                topic,
+                self._publisher_qos,
+            )
             self._tag_frames[sanitized] = f"zerokey_tag_{sanitized}"
             self.get_logger().info(
                 f"Created ROS interfaces for tag '{tag_key}' on topic '{topic}'."
@@ -343,13 +421,12 @@ class ZeroKeyNode(Node):
 
         tag_key = self._extract_tag_key(payload)
         publisher, child_frame_id, sanitized_tag = self._get_publisher_for_tag(tag_key)
-        world_frame = self._parameter_value("world_frame")
 
         # For details regarding the mapping of ZeroKey event data to ROS messages, see:
         # https://infocentre.zerokey.com/articles/utilizing-location-raw-update-events-in-python#UtilizingLocationRawUpdateEventsinPython-InterpretingtheOutput
         odom_msg = Odometry()
         odom_msg.header.stamp = stamp.to_msg()
-        odom_msg.header.frame_id = world_frame
+        odom_msg.header.frame_id = self._world_frame
         odom_msg.child_frame_id = child_frame_id
         odom_msg.pose.pose.position.x = float(position[0])
         odom_msg.pose.pose.position.y = float(position[1])
@@ -358,23 +435,26 @@ class ZeroKeyNode(Node):
         odom_msg.pose.pose.orientation.x = float(orientation[1])
         odom_msg.pose.pose.orientation.y = float(orientation[2])
         odom_msg.pose.pose.orientation.z = float(orientation[3])
+        odom_msg.pose.covariance = self._pose_covariance
 
         if isinstance(velocity, (list, tuple)) and len(velocity) >= 3:
             odom_msg.twist.twist.linear.x = float(velocity[0])
             odom_msg.twist.twist.linear.y = float(velocity[1])
             odom_msg.twist.twist.linear.z = float(velocity[2])
+        odom_msg.twist.covariance = self._twist_covariance
 
         publisher.publish(odom_msg)
 
-        transform = TransformStamped()
-        transform.header.stamp = odom_msg.header.stamp
-        transform.header.frame_id = world_frame
-        transform.child_frame_id = child_frame_id
-        transform.transform.translation.x = odom_msg.pose.pose.position.x
-        transform.transform.translation.y = odom_msg.pose.pose.position.y
-        transform.transform.translation.z = odom_msg.pose.pose.position.z
-        transform.transform.rotation = odom_msg.pose.pose.orientation
-        self._tf_broadcaster.sendTransform(transform)
+        if self._publish_tf:
+            transform = TransformStamped()
+            transform.header.stamp = odom_msg.header.stamp
+            transform.header.frame_id = self._world_frame
+            transform.child_frame_id = child_frame_id
+            transform.transform.translation.x = odom_msg.pose.pose.position.x
+            transform.transform.translation.y = odom_msg.pose.pose.position.y
+            transform.transform.translation.z = odom_msg.pose.pose.position.z
+            transform.transform.rotation = odom_msg.pose.pose.orientation
+            self._tf_broadcaster.sendTransform(transform)
 
         self.get_logger().debug(
             f"Published tag '{sanitized_tag}' sequence={content.get('Sequence')}."
