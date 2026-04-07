@@ -6,6 +6,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     ip = LaunchConfiguration("ip")
+    publish_tf = LaunchConfiguration("publish_tf")
 
     return LaunchDescription(
         [
@@ -13,6 +14,11 @@ def generate_launch_description():
                 "ip",
                 default_value="192.168.50.87",
                 description="ZeroKey server IP address",
+            ),
+            DeclareLaunchArgument(
+                "publish_tf",
+                default_value="false",
+                description="Publish raw zerokey_world -> zerokey_tag TF.",
             ),
             Node(
                 package="zerokey_ros2",
@@ -22,6 +28,7 @@ def generate_launch_description():
                 parameters=[
                     {
                         "ip": ip,
+                        "publish_tf": publish_tf,
                     }
                 ],
             )
