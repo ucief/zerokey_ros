@@ -45,3 +45,22 @@ Or with launch:
 ```bash
 ros2 launch zerokey_ros2 zerokey.launch.py ip:=192.168.50.87
 ```
+
+## Direct API Logger
+
+If you want to inspect the ZeroKey stream without going through ROS topics, run:
+
+```bash
+ros2 run zerokey_ros2 api_debug --ip 192.168.50.87
+```
+
+This connects directly to the ZeroKey REST API and EventHub, logs every received payload to stdout, and writes:
+
+- a CSV with receive timestamps, message timestamps, tag metadata, and the raw payload JSON
+- a PNG timing plot showing arrival time, the timestamp carried in each message, arrival-minus-message lag, and the arrival rate averaged over a trailing 2 s window
+
+Useful options:
+
+- `--output-directory <dir>` to choose where the CSV and PNG are saved
+- `--file-prefix <prefix>` to customize the output filenames
+- `--rate-window-sec <sec>` to change the averaging window for the rate plot
