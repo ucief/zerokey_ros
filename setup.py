@@ -37,6 +37,7 @@ setup(
     entry_points={
         "console_scripts": [
             "zerokey_node = zerokey_ros2.zerokey_node:main",
+            "zerokey_fusion_node = zerokey_ros2.zerokey_fusion_node:main",
             "api_debug = zerokey_ros2.api_debug:main",
         ],
     },

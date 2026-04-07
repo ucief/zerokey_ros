@@ -7,6 +7,11 @@ It connects to the ZeroKey EventHub API, subscribes to `position_events`, and pu
 - `nav_msgs/msg/Odometry` on `zerokey/tags/<tag_id>/odom`
 - `tf2` transforms from `zerokey_world` to `zerokey_tag_<tag_id>`
 
+The package also provides a fusion node that subscribes to one ZeroKey odometry topic plus one robot odometry topic, runs the ZeroKey/odom EKF online, and publishes:
+
+- `tf2` transform from `zerokey_world` to `odom`
+- `nav_msgs/msg/Odometry` on `zerokey/odom_transform` carrying the estimated transform pose and covariance
+
 Tag interfaces are created dynamically, so the node can handle all available mobile tags without hardcoding a fixed number.
 
 ## Parameters
@@ -44,6 +49,37 @@ Or with launch:
 
 ```bash
 ros2 launch zerokey_ros2 zerokey.launch.py ip:=192.168.50.87
+```
+
+## Fusion Node
+
+Run the fusion node directly:
+
+```bash
+ros2 run zerokey_ros2 zerokey_fusion_node --ros-args \
+  -p zerokey_odom_topic:=/zerokey/tags/ed_e5_83_3f_e3_75/odom \
+  -p odom_topic:=/a300_00010/platform/odom/filtered
+```
+
+Useful fusion parameters:
+
+- `zerokey_odom_topic`: ZeroKey odometry topic to fuse
+- `odom_topic`: robot odometry topic to fuse against ZeroKey
+- `transform_topic`: output topic for the estimated `zerokey_world -> odom` transform pose, default `zerokey/odom_transform`
+- `publish_tf`: whether to publish the fused TF, default `true`
+- `zerokey_pos_time_offset_sec`: applies the ZeroKey position timing offset used in the notebook, default `-0.2`
+- `heading_lookback_sec`: sliding window used for displacement-derived heading, default `0.75`
+- `heading_min_displacement_m`: minimum ZeroKey displacement required before generating a yaw update, default `0.20`
+- `processing_delay_sec`: queueing delay so out-of-order and time-offset measurements can still be processed in timestamp order, default `0.25`
+
+Or start both nodes from launch:
+
+```bash
+ros2 launch zerokey_ros2 zerokey.launch.py \
+  ip:=192.168.50.87 \
+  start_fusion:=true \
+  zerokey_odom_topic:=/zerokey/tags/ed_e5_83_3f_e3_75/odom \
+  odom_topic:=/a300_00010/platform/odom/filtered
 ```
 
 ## Direct API Logger
